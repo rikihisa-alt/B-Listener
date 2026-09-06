@@ -15,11 +15,21 @@ import {
   startRecording,
   stopRecording,
 } from "@/lib/ipc";
+import { canUseBrowserMicrophone, isWeb, microphoneBlockedReason } from "@/lib/runtime";
 import type { MeetingDetail, RecordingSnapshot } from "@/types/ipc";
 
 import { AnalysisSection } from "./AnalysisPanel";
+import { startBrowserRecording, type BrowserRecorderHandle } from "./browserRecorder";
 import { LevelMeter } from "./LevelMeter";
 import "./live.css";
+
+/** ブラウザ版で、この端末をどう表示するか。 */
+function browserLabel(): string {
+  const ua = navigator.userAgent;
+  if (ua.includes("Mac")) return "ブラウザのマイク（Mac）";
+  if (ua.includes("Windows")) return "ブラウザのマイク（Windows）";
+  return "ブラウザのマイク";
+}
 
 /** この時間だけ入力レベルがゼロなら、マイクが拾えていない可能性を警告する。 */
 const SILENCE_WARNING_MS = 5000;
@@ -36,6 +46,10 @@ export function LiveMeetingPage() {
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [starting, setStarting] = useState(true);
+  const [uploadWarning, setUploadWarning] = useState<string | null>(null);
+
+  /** ブラウザ版でマイクを扱うハンドル（デスクトップ版では null のまま）。 */
+  const browserRecorder = useRef<BrowserRecorderHandle | null>(null);
 
   /** 一度でも音を拾えたか。警告の誤検知を防ぐために保持する。 */
   const heardSound = useRef(false);
@@ -62,8 +76,27 @@ export function LiveMeetingPage() {
           setSnapshot(current);
         } else if (current) {
           setError("別の会議を録音中です。先にそちらを終了してください。");
+        } else if (isWeb && !canUseBrowserMicrophone()) {
+          // 録音を始める前に弾く。サーバ側に中途半端な状態を作らないため。
+          setError(microphoneBlockedReason());
         } else {
-          setSnapshot(await startRecording(meetingId));
+          const started = await startRecording(meetingId, isWeb ? browserLabel() : undefined);
+          if (cancelled) return;
+
+          if (isWeb) {
+            try {
+              browserRecorder.current = await startBrowserRecording({
+                meetingId,
+                onWarning: setUploadWarning,
+              });
+            } catch (e) {
+              // マイクを開けなかった場合、サーバ側の録音を必ず終わらせる。
+              // そのままにすると「録音中」の会議が残ってしまう。
+              await stopRecording().catch(() => undefined);
+              throw e;
+            }
+          }
+          setSnapshot(started);
         }
       } catch (e) {
         if (!cancelled) setError(toMessage(e));
@@ -110,6 +143,11 @@ export function LiveMeetingPage() {
     setStopping(true);
     setError(null);
     try {
+      // 先にブラウザ側を止め、未送信の音声を送り切ってからサーバへ終了を伝える。
+      if (browserRecorder.current) {
+        await browserRecorder.current.stop();
+        browserRecorder.current = null;
+      }
       await stopRecording();
       navigate(`/meetings/${meetingId}`, { replace: true });
     } catch (e) {
@@ -165,6 +203,11 @@ export function LiveMeetingPage() {
         {diskWarning && (
           <Alert tone="warn" title="空き容量が不足しています">
             {diskWarning}
+          </Alert>
+        )}
+        {uploadWarning && (
+          <Alert tone="warn" title="録音データの送信">
+            {uploadWarning}
           </Alert>
         )}
         {showSilenceWarning && (

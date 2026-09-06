@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
-
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/Feedback";
 import { toMessage } from "@/lib/errors";
+import { canRevealInFolder, revealInFolder, saveDocument } from "@/lib/files";
 import { formatClock } from "@/lib/format";
 import { getTranscript } from "@/lib/ipc";
 import type { TranscriptSegment } from "@/types/ipc";
@@ -73,10 +72,21 @@ export function TranscriptCard({
               {expanded ? "先頭だけ表示" : "すべて表示"}
             </Button>
           )}
-          {transcriptPath && (
+          <Button
+            icon="download"
+            onClick={() => {
+              void saveDocument(meetingId, "transcript", "transcript.txt").catch((e) =>
+                setError(toMessage(e)),
+              );
+            }}
+          >
+            文字起こしを保存
+          </Button>
+          {canRevealInFolder && transcriptPath && (
             <Button
+              icon="folder"
               onClick={() => {
-                void revealItemInDir(transcriptPath).catch((e) => setError(toMessage(e)));
+                void revealInFolder(transcriptPath).catch((e) => setError(toMessage(e)));
               }}
             >
               保存場所を開く

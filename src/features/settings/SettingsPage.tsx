@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { FieldRow, SwitchField } from "@/components/ui/Field";
 import { Alert, Badge, ErrorBanner } from "@/components/ui/Feedback";
 import { toMessage } from "@/lib/errors";
+import { canRevealInFolder, revealInFolder } from "@/lib/files";
+import { isDesktop } from "@/lib/runtime";
 import {
   checkComponents,
   getSettings,
@@ -147,7 +148,11 @@ export function SettingsPage() {
           <div className="stack gap-16">
             <FieldRow
               label="保存先フォルダ"
-              hint="会議ごとにフォルダを作り、音声・議事録・まとめを保存します。"
+              hint={
+                isDesktop
+                  ? "会議ごとにフォルダを作り、音声・議事録・まとめを保存します。"
+                  : "サーバを動かしているPC内のフォルダです。会議データはここから外に出ません。"
+              }
             >
               {(id) => (
                 <div className="row gap-8">
@@ -157,17 +162,19 @@ export function SettingsPage() {
                     value={settings.meetingsDir}
                     onChange={(e) => patch({ meetingsDir: e.target.value })}
                   />
-                  <Button onClick={() => void chooseFolder()}>変更</Button>
-                  <Button
-                    icon="folder"
-                    onClick={() => {
-                      void revealItemInDir(settings.meetingsDir).catch((e) =>
-                        setError(toMessage(e)),
-                      );
-                    }}
-                  >
-                    開く
-                  </Button>
+                  {isDesktop && <Button onClick={() => void chooseFolder()}>変更</Button>}
+                  {canRevealInFolder && (
+                    <Button
+                      icon="folder"
+                      onClick={() => {
+                        void revealInFolder(settings.meetingsDir).catch((e) =>
+                          setError(toMessage(e)),
+                        );
+                      }}
+                    >
+                      開く
+                    </Button>
+                  )}
                 </div>
               )}
             </FieldRow>
@@ -262,6 +269,7 @@ export function SettingsPage() {
           </div>
         </Card>
 
+        {isDesktop ? (
         <Card title="録音" icon="mic" iconTone="green">
           <div className="stack gap-16">
             {deviceError && (
@@ -292,6 +300,14 @@ export function SettingsPage() {
             </FieldRow>
           </div>
         </Card>
+        ) : (
+          <Card title="録音" icon="mic" iconTone="green">
+            <p className="text-muted">
+              ブラウザ版では、お使いのPCのマイクをブラウザが選びます。
+              マイクの選択や許可はブラウザ側の設定から変更してください。
+            </p>
+          </Card>
+        )}
 
         <Card
           title="動作状況"
@@ -325,6 +341,8 @@ export function SettingsPage() {
               <dl className="detail-grid">
                 <dt>バージョン</dt>
                 <dd>{info.appVersion}</dd>
+                <dt>実行モード</dt>
+                <dd>{isDesktop ? "デスクトップ版" : "ブラウザ版（社内サーバ）"}</dd>
                 <dt>OS</dt>
                 <dd>{info.os}</dd>
                 <dt>データフォルダ</dt>
@@ -334,16 +352,18 @@ export function SettingsPage() {
                 <dt>ログ</dt>
                 <dd className="mono">{info.logDir}</dd>
               </dl>
-              <div>
-                <Button
-                  icon="folder"
-                  onClick={() => {
-                    void revealItemInDir(info.logDir).catch((e) => setError(toMessage(e)));
-                  }}
-                >
-                  ログを開く
-                </Button>
-              </div>
+              {canRevealInFolder && (
+                <div>
+                  <Button
+                    icon="folder"
+                    onClick={() => {
+                      void revealInFolder(info.logDir).catch((e) => setError(toMessage(e)));
+                    }}
+                  >
+                    ログを開く
+                  </Button>
+                </div>
+              )}
             </div>
           </Card>
         )}

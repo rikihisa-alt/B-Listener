@@ -7,5 +7,6 @@ pub mod devices;
 pub mod recorder;
 pub mod recovery;
 pub mod resample;
+pub mod upload_recorder;
 pub mod wav_reader;
 pub mod wav_sink;

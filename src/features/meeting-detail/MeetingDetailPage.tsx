@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
-
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Alert, Badge, ErrorBanner } from "@/components/ui/Feedback";
 import { Icon, IconBadge } from "@/components/ui/Icon";
 import { STATUS_LABEL, statusTone } from "@/features/home/meetingStatus";
 import { toMessage } from "@/lib/errors";
+import {
+  audioUrl,
+  canRevealInFolder,
+  revealInFolder,
+  saveAudio,
+  saveDocument,
+} from "@/lib/files";
 import { formatClock, formatDate, formatDurationJa } from "@/lib/format";
 import {
   deleteMeeting,
-  exportMeetingAudio,
-  exportMeetingDocument,
   getMeetingDetail,
   listMeetingFiles,
   readMeetingDocument,
@@ -82,27 +83,23 @@ export function MeetingDetailPage() {
     }
   }
 
-  /** 成果物を任意の場所へ書き出す。会議フォルダの原本はそのまま残す。 */
+  /** 成果物を保存する。会議フォルダの原本はそのまま残る。 */
   async function exportDocument(document: MeetingDocument, defaultName: string) {
     if (!meetingId) return;
     try {
       setError(null);
-      const target = await saveDialog({ defaultPath: defaultName });
-      if (!target) return;
-      await exportMeetingDocument(meetingId, document, target);
+      await saveDocument(meetingId, document, defaultName);
     } catch (e) {
       setError(toMessage(e));
     }
   }
 
-  /** 音声ファイルを任意の場所へ書き出す。 */
+  /** 録音音声を保存する。 */
   async function exportAudio() {
     if (!meetingId) return;
     try {
       setError(null);
-      const target = await saveDialog({ defaultPath: "audio.wav" });
-      if (!target) return;
-      await exportMeetingAudio(meetingId, target);
+      await saveAudio(meetingId);
     } catch (e) {
       setError(toMessage(e));
     }
@@ -219,7 +216,7 @@ export function MeetingDetailPage() {
                 <audio
                   controls
                   preload="none"
-                  src={convertFileSrc(meeting.audioPath)}
+                  src={audioUrl(meeting.id, meeting.audioPath)}
                   style={{ width: "100%" }}
                 >
                   お使いの環境では音声を再生できません。
@@ -229,16 +226,18 @@ export function MeetingDetailPage() {
                 <Button variant="primary" icon="download" onClick={() => void exportAudio()}>
                   保存
                 </Button>
-                <Button
-                  icon="folder"
-                  onClick={() => {
-                    void revealItemInDir(meeting.audioPath ?? "").catch((e) =>
-                      setError(toMessage(e)),
-                    );
-                  }}
-                >
-                  保存場所を開く
-                </Button>
+                {canRevealInFolder && (
+                  <Button
+                    icon="folder"
+                    onClick={() => {
+                      void revealInFolder(meeting.audioPath ?? "").catch((e) =>
+                        setError(toMessage(e)),
+                      );
+                    }}
+                  >
+                    保存場所を開く
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -291,14 +290,16 @@ export function MeetingDetailPage() {
             icon="folder"
             iconTone="orange"
             actions={
-              <Button
-                icon="folder"
-                onClick={() => {
-                  void revealItemInDir(files[0]?.path ?? "").catch((e) => setError(toMessage(e)));
-                }}
-              >
-                保存フォルダを開く
-              </Button>
+              canRevealInFolder ? (
+                <Button
+                  icon="folder"
+                  onClick={() => {
+                    void revealInFolder(files[0]?.path ?? "").catch((e) => setError(toMessage(e)));
+                  }}
+                >
+                  保存フォルダを開く
+                </Button>
+              ) : undefined
             }
           >
             <div className="file-row">

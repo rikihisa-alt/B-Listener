@@ -1,6 +1,13 @@
 # B-Listener
 
-会議を録音し、終了後に **音声 / 議事録 / AIまとめ** を確実に出力するデスクトップアプリ（Windows / macOS）。
+会議を録音し、終了後に **音声 / 議事録 / AIまとめ** を確実に出力するアプリ。
+
+2 つの使い方があります。
+
+- **デスクトップ版** … Windows / macOS にインストールして使う
+- **ブラウザ版** … 社内の1台でサーバを動かし、他のPCのブラウザから使う（[docs/07-browser-mode.md](docs/07-browser-mode.md)）
+
+どちらも同じコア処理・同じ保存先を使います。
 
 すべての処理はローカルで完結します。会議音声・文字起こし・個人情報は一切外部へ送信しません。運用時に有料APIは使用しません。
 
@@ -48,6 +55,7 @@
 | [docs/04-roadmap.md](docs/04-roadmap.md) | 各Phaseの実装内容と完了条件 |
 | [docs/05-risks.md](docs/05-risks.md) | リスクと対策 / Windows・macOS の注意点 |
 | [docs/06-prompts.md](docs/06-prompts.md) | AIプロンプト設計と構造化出力スキーマ |
+| [docs/07-browser-mode.md](docs/07-browser-mode.md) | ブラウザ版（社内サーバ）の構成・起動方法・制約 |
 
 ---
 
@@ -154,9 +162,16 @@ git push origin v0.1.0
 
 ```bash
 npm install                 # 依存関係の取得（初回のみ）
-npm run tauri dev           # 開発モードで起動（ホットリロードあり）
+npm run tauri dev           # デスクトップ版を開発モードで起動
 npm run typecheck           # TypeScript の型チェック
 npm run build               # フロントエンドのビルド
+```
+
+ブラウザ版のサーバ:
+
+```bash
+npm run build
+cd src-tauri && cargo run --features server --bin b-listener-server
 ```
 
 Rust 側:

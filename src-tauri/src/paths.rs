@@ -90,6 +90,39 @@ impl MeetingFiles {
     pub const METADATA: &'static str = "metadata.json";
 }
 
+/// Tauri を使わずにアプリのディレクトリを解決する（ブラウザ版のサーバ用）。
+///
+/// デスクトップ版と**同じ場所**を指すため、同じPCで両方を使っても
+/// 会議データや設定が分かれてしまうことはない。
+pub fn default_app_paths() -> Option<(PathBuf, PathBuf)> {
+    /// Tauri の `identifier` と一致させること。ずれるとデータが分かれてしまう。
+    const APP_ID: &str = "jp.blistener.app";
+
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
+
+    #[cfg(target_os = "macos")]
+    let app_data = home.join("Library/Application Support").join(APP_ID);
+
+    #[cfg(target_os = "windows")]
+    let app_data = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("AppData").join("Roaming"))
+        .join(APP_ID);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let app_data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local").join("share"))
+        .join(APP_ID);
+
+    let documents = home.join("Documents");
+    let meetings = documents.join("B-Listener").join("Meetings");
+
+    Some((app_data, meetings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

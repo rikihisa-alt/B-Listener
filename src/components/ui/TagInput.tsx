@@ -19,8 +19,15 @@ interface TagInputProps {
  */
 export function TagInput({ values, onChange, placeholder, label, id }: TagInputProps) {
   const [draft, setDraft] = useState("");
-  const [composing, setComposing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  /**
+   * IME 変換中かどうか。
+   *
+   * state ではなく ref で持つ。state だと `compositionend` の直後に
+   * 押された Enter が「まだ変換中」と誤判定され、タグが追加できなくなる
+   * （React の再描画が間に合わないため）。
+   */
+  const composingRef = useRef(false);
 
   function commit(raw: string) {
     // 「、」「,」区切りの貼り付けにも対応する
@@ -68,12 +75,17 @@ export function TagInput({ values, onChange, placeholder, label, id }: TagInputP
         value={draft}
         placeholder={values.length === 0 ? placeholder : ""}
         onChange={(e) => setDraft(e.target.value)}
-        onCompositionStart={() => setComposing(true)}
-        onCompositionEnd={() => setComposing(false)}
+        onCompositionStart={() => {
+          composingRef.current = true;
+        }}
+        onCompositionEnd={() => {
+          composingRef.current = false;
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
-            // IME 変換確定の Enter ではタグ化しない
-            if (composing || e.nativeEvent.isComposing) return;
+            // 変換確定の Enter ではタグ化せず、確定後の Enter で追加する。
+            // ブラウザによって isComposing の立ち方が違うため両方を見る。
+            if (composingRef.current || e.nativeEvent.isComposing) return;
             e.preventDefault();
             commit(draft);
           } else if (e.key === "Backspace" && draft === "" && values.length > 0) {

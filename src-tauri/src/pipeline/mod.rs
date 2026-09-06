@@ -12,13 +12,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::audio::recovery;
 use crate::audio::resample::TARGET_SAMPLE_RATE;
 use crate::db::models::{JobState, MeetingStatus, PipelineStep, TranscriptKind};
 use crate::db::repo;
 use crate::error::{AppError, AppResult};
+use crate::events::AppEvent;
 use crate::state::AppState;
 use crate::storage;
 use crate::stt::{self, whisper::WhisperTranscriber, TranscribeOptions};
@@ -59,9 +59,8 @@ const STEPS: &[PipelineStep] = &[
 /// 会議終了後の処理をバックグラウンドで開始する。
 ///
 /// 同じ会議に対して二重に起動しない。UI をブロックしないよう別スレッドで動かす。
-pub fn spawn<R: Runtime>(app: AppHandle<R>, meeting_id: String) {
+pub fn spawn(state: Arc<AppState>, meeting_id: String) {
     {
-        let state = app.state::<AppState>();
         let mut running = match state.running_pipelines.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -75,25 +74,23 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>, meeting_id: String) {
     let spawn_result = std::thread::Builder::new()
         .name("b-listener-pipeline".into())
         .spawn({
-            let app = app.clone();
+            let state = state.clone();
             let meeting_id = meeting_id.clone();
             move || {
-                let result = run_blocking(&app, &meeting_id);
-                finish(&app, &meeting_id, result);
+                let result = run_blocking(&state, &meeting_id);
+                finish(&state, &meeting_id, result);
             }
         });
 
     if let Err(e) = spawn_result {
         tracing::error!(error = %e, "処理スレッドを起動できませんでした");
-        let state = app.state::<AppState>();
         if let Ok(mut running) = state.running_pipelines.lock() {
             running.remove(&meeting_id);
         };
     }
 }
 
-fn finish<R: Runtime>(app: &AppHandle<R>, meeting_id: &str, result: AppResult<()>) {
-    let state = app.state::<AppState>();
+fn finish(state: &AppState, meeting_id: &str, result: AppResult<()>) {
     if let Ok(mut running) = state.running_pipelines.lock() {
         running.remove(meeting_id);
     }
@@ -106,7 +103,9 @@ fn finish<R: Runtime>(app: &AppHandle<R>, meeting_id: &str, result: AppResult<()
                 tracing::error!(error = %e, "会議状態を更新できませんでした");
             }
             tracing::info!(meeting_id = %meeting_id, "会議終了後の処理が完了しました");
-            let _ = app.emit("pipeline:done", meeting_id.to_string());
+            state
+                .events
+                .emit(AppEvent::PipelineDone(meeting_id.to_string()));
         }
         Err(error) => {
             // 失敗しても音声は必ず残る。状態を failed にして UI から再実行できるようにする。
@@ -118,19 +117,14 @@ fn finish<R: Runtime>(app: &AppHandle<R>, meeting_id: &str, result: AppResult<()
             }
             tracing::error!(meeting_id = %meeting_id, error = %error, "会議終了後の処理が失敗しました");
 
-            let failure = build_failure(app, meeting_id, &error);
-            let _ = app.emit("pipeline:failed", failure);
+            let failure = build_failure(state, meeting_id, &error);
+            state.events.emit(AppEvent::PipelineFailed(failure));
         }
     }
 }
 
 /// 失敗時に「何が残っているか」を調べて伝える。
-fn build_failure<R: Runtime>(
-    app: &AppHandle<R>,
-    meeting_id: &str,
-    error: &AppError,
-) -> PipelineFailure {
-    let state = app.state::<AppState>();
+fn build_failure(state: &AppState, meeting_id: &str, error: &AppError) -> PipelineFailure {
     let mut preserved = Vec::new();
     let mut failed_step = PipelineStep::Transcribe;
 
@@ -177,8 +171,7 @@ fn build_failure<R: Runtime>(
 /// 会議終了後の処理を同期実行する。
 ///
 /// 通常は [`spawn`] から別スレッドで呼ばれる。統合テストからも直接呼べるよう公開している。
-pub fn run_blocking<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> AppResult<()> {
-    let state = app.state::<AppState>();
+pub fn run_blocking(state: &AppState, meeting_id: &str) -> AppResult<()> {
     state
         .db
         .with_conn(|conn| repo::set_meeting_status(conn, meeting_id, MeetingStatus::Processing))?;
@@ -204,12 +197,12 @@ pub fn run_blocking<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> AppResu
         state.db.with_conn(|conn| {
             repo::set_job_state(conn, meeting_id, step, JobState::Running, None)
         })?;
-        emit_progress(app, meeting_id, step, index, 0, step.label());
+        emit_progress(state, meeting_id, step, index, 0, step.label());
 
         let outcome = match step {
-            PipelineStep::FinalizeAudio => finalize_audio(app, meeting_id),
-            PipelineStep::Transcribe => transcribe(app, meeting_id, index),
-            PipelineStep::Persist => persist(app, meeting_id),
+            PipelineStep::FinalizeAudio => finalize_audio(state, meeting_id),
+            PipelineStep::Transcribe => transcribe(state, meeting_id, index),
+            PipelineStep::Persist => persist(state, meeting_id),
             // Phase 4 以降で実装するステップ。現時点では STEPS に含めていない。
             other => Err(AppError::Other(format!(
                 "ステップ {} はまだ実装されていません",
@@ -222,7 +215,7 @@ pub fn run_blocking<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> AppResu
                 state.db.with_conn(|conn| {
                     repo::set_job_state(conn, meeting_id, step, JobState::Done, None)
                 })?;
-                emit_progress(app, meeting_id, step, index, 100, step.label());
+                emit_progress(state, meeting_id, step, index, 100, step.label());
             }
             Err(e) => {
                 let message = e.to_string();
@@ -239,8 +232,8 @@ pub fn run_blocking<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> AppResu
     Ok(())
 }
 
-fn emit_progress<R: Runtime>(
-    app: &AppHandle<R>,
+fn emit_progress(
+    state: &AppState,
     meeting_id: &str,
     step: PipelineStep,
     index: usize,
@@ -256,9 +249,7 @@ fn emit_progress<R: Runtime>(
         percent,
         message: message.to_string(),
     };
-    if let Err(e) = app.emit("pipeline:progress", payload) {
-        tracing::warn!(error = %e, "進捗の通知に失敗しました");
-    }
+    state.events.emit(AppEvent::PipelineProgress(payload));
 }
 
 // ------------------------------------------------------------ 各ステップ
@@ -267,8 +258,7 @@ fn emit_progress<R: Runtime>(
 ///
 /// このステップが通れば「音声だけは必ずある」状態が保証される。
 /// 以降のステップが全て失敗しても、利用者は録音を手に入れられる。
-fn finalize_audio<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> AppResult<()> {
-    let state = app.state::<AppState>();
+fn finalize_audio(state: &AppState, meeting_id: &str) -> AppResult<()> {
     let meeting = state
         .db
         .with_conn(|conn| repo::get_meeting(conn, meeting_id))?;
@@ -311,12 +301,7 @@ fn finalize_audio<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> AppResult
 }
 
 /// 保存済みの音声全体から、精度優先の設定で文字起こしを作り直す。
-fn transcribe<R: Runtime>(
-    app: &AppHandle<R>,
-    meeting_id: &str,
-    step_index: usize,
-) -> AppResult<()> {
-    let state = app.state::<AppState>();
+fn transcribe(state: &AppState, meeting_id: &str, step_index: usize) -> AppResult<()> {
     let settings = state.settings.get();
 
     let meeting = state
@@ -345,21 +330,22 @@ fn transcribe<R: Runtime>(
     let mut transcriber = WhisperTranscriber::load(&model_path, &settings.whisper_model)?;
 
     let progress: stt::FileProgressFn = {
-        let app = app.clone();
+        let events = state.events.clone();
         let meeting_id = meeting_id.to_string();
         Arc::new(move |percent, done_ms, total_ms| {
-            emit_progress(
-                &app,
-                &meeting_id,
-                PipelineStep::Transcribe,
+            events.emit(AppEvent::PipelineProgress(PipelineProgress {
+                meeting_id: meeting_id.clone(),
+                step: PipelineStep::Transcribe,
+                label: PipelineStep::Transcribe.label().to_string(),
                 step_index,
+                step_total: STEPS.len(),
                 percent,
-                &format!(
+                message: format!(
                     "文字起こし {} / {}",
                     crate::stt::format_timestamp(done_ms),
                     crate::stt::format_timestamp(total_ms)
                 ),
-            );
+            }));
         })
     };
 
@@ -393,8 +379,7 @@ fn transcribe<R: Runtime>(
 }
 
 /// 会議フォルダ内の `metadata.json` を更新する。
-fn persist<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> AppResult<()> {
-    let state = app.state::<AppState>();
+fn persist(state: &AppState, meeting_id: &str) -> AppResult<()> {
     let settings = state.settings.get();
 
     let detail = state

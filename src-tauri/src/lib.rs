@@ -1,18 +1,27 @@
-//! B-Listener — AI議事録デスクトップアプリ
+//! B-Listener — AI議事録デスクトップアプリ / ブラウザ版
 //!
 //! 設計ドキュメントは `docs/` を参照。
 //!
 //! 設計上の最優先事項は「録音データを絶対に失わない」こと。
 //! そのため音声処理 (`audio`) は文字起こし (`stt`) や AI 処理 (`llm`) に依存せず、
 //! 上位の `pipeline` だけがそれらを結合する。
+//!
+//! UI は 2 種類ある。
+//! - デスクトップ版: Tauri（このファイルの `run`）
+//! - ブラウザ版: HTTP サーバ（`server` モジュール / `b-listener-server` バイナリ）
+//!
+//! どちらも `state::AppState` を通して同じコア処理を呼び、
+//! 差異は「UI への通知の送り先」(`events::EventSink`) にだけ閉じ込めている。
 
 pub mod audio;
 pub mod commands;
 pub mod db;
 pub mod error;
+pub mod events;
 pub mod logging;
 pub mod paths;
 pub mod pipeline;
+pub mod server;
 pub mod settings;
 pub mod state;
 pub mod storage;
@@ -20,13 +29,26 @@ pub mod stt;
 pub mod sysutil;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager, Runtime};
 
-use crate::audio::recorder::Recorder;
-use crate::db::Database;
-use crate::settings::SettingsStore;
+use crate::events::{AppEvent, EventSink};
 use crate::state::{AppPaths, AppState};
+
+/// Tauri のイベントとして UI へ通知する送り先。
+struct TauriSink<R: Runtime> {
+    app: tauri::AppHandle<R>,
+}
+
+impl<R: Runtime> EventSink for TauriSink<R> {
+    fn emit(&self, event: AppEvent) {
+        if let Err(e) = self.app.emit(event.name(), event.payload()) {
+            // 通知に失敗しても処理は続ける（UI の表示が遅れるだけ）。
+            tracing::warn!(event = event.name(), error = %e, "通知の送信に失敗しました");
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -44,40 +66,16 @@ pub fn run() {
                 "B-Listener を起動します"
             );
 
-            std::fs::create_dir_all(&paths.app_data_dir)?;
-            std::fs::create_dir_all(&paths.models_dir)?;
-
-            let settings =
-                SettingsStore::load(&paths.app_data_dir, paths.default_meetings_dir.clone());
-            if let Err(e) = settings.ensure_persisted() {
-                // 保存先が作れなくてもアプリは起動させ、設定画面で直せるようにする。
-                tracing::error!(error = %e, "保存先フォルダの準備に失敗しました");
-            }
-
-            let db = Database::open(&paths.app_data_dir.join("app.db"))?;
-
-            // 前回が異常終了だった場合に備え、起動時点で件数だけ確認しておく。
-            // 実際の復旧処理は Phase 2（録音）で実装する。
-            match db.with_conn(db::repo::list_interrupted_meetings) {
-                Ok(list) if !list.is_empty() => {
-                    tracing::warn!(count = list.len(), "中断された会議があります");
-                }
-                Ok(_) => {}
-                Err(e) => tracing::error!(error = %e, "中断された会議の確認に失敗しました"),
-            }
-
-            app.manage(AppState {
-                paths,
-                db,
-                settings,
-                recorder: Recorder::new(),
-                running_pipelines: std::sync::Mutex::new(std::collections::HashSet::new()),
-                download_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                downloading_model: std::sync::Mutex::new(None),
-                _log_guard: log_guard,
+            let events: events::SharedEventSink = Arc::new(TauriSink {
+                app: app.handle().clone(),
             });
+            let state = AppState::bootstrap(paths, events)?;
 
-            spawn_recording_ticker(app.handle().clone());
+            app.manage(state.clone());
+            spawn_recording_ticker(state);
+
+            // ログのガードは Tauri 側で保持する（AppState は共有されるため入れない）。
+            app.manage(LogGuard(log_guard));
 
             Ok(())
         })
@@ -118,10 +116,12 @@ pub fn run() {
         .expect("Tauri アプリケーションの起動に失敗しました");
 }
 
+/// ログ書き出しスレッドのガードを、アプリの寿命と同じだけ保持するための入れ物。
+struct LogGuard(#[allow(dead_code)] Option<tracing_appender::non_blocking::WorkerGuard>);
+
 /// OS ごとの標準的な場所からアプリのディレクトリを解決する。
 fn resolve_paths(app: &tauri::AppHandle) -> Result<AppPaths, Box<dyn std::error::Error>> {
     let resolver = app.path();
-
     let app_data_dir = resolver.app_data_dir()?;
 
     // 保存先の既定は「書類 / B-Listener / Meetings」。
@@ -144,17 +144,17 @@ fn resolve_paths(app: &tauri::AppHandle) -> Result<AppPaths, Box<dyn std::error:
 ///
 /// UI からのポーリングではなくイベントで通知することで、
 /// 会議中の画面更新が IPC の往復に依存しないようにする。
-fn spawn_recording_ticker(app: tauri::AppHandle) {
+/// デスクトップ版・ブラウザ版のどちらでも同じ処理を使う。
+pub fn spawn_recording_ticker(state: Arc<AppState>) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
-    use tauri::Emitter;
 
     /// 画面の経過時間表示に十分で、かつ負荷にならない間隔。
     const TICK_INTERVAL: Duration = Duration::from_millis(500);
     /// 空き容量を確認する間隔。
     const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("b-listener-recording-ticker".into())
         .spawn(move || {
             let error_notified = AtomicBool::new(false);
@@ -163,8 +163,7 @@ fn spawn_recording_ticker(app: tauri::AppHandle) {
             loop {
                 std::thread::sleep(TICK_INTERVAL);
 
-                let state = app.state::<AppState>();
-                let Some(snapshot) = state.recorder.snapshot() else {
+                let Some(snapshot) = server::service::get_recording_state(&state) else {
                     error_notified.store(false, Ordering::Relaxed);
                     continue;
                 };
@@ -172,15 +171,11 @@ fn spawn_recording_ticker(app: tauri::AppHandle) {
                 // 録音が継続できないエラーは一度だけ通知する。
                 if let Some(message) = snapshot.error.as_ref() {
                     if !error_notified.swap(true, Ordering::Relaxed) {
-                        if let Err(e) = app.emit("recording:error", message.clone()) {
-                            tracing::warn!(error = %e, "録音エラーの通知に失敗しました");
-                        }
+                        state.events.emit(AppEvent::RecordingError(message.clone()));
                     }
                 }
 
-                if let Err(e) = app.emit("recording:tick", &snapshot) {
-                    tracing::warn!(error = %e, "録音状態の通知に失敗しました");
-                }
+                state.events.emit(AppEvent::RecordingTick(snapshot));
 
                 if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
                     last_disk_check = Instant::now();
@@ -192,14 +187,18 @@ fn spawn_recording_ticker(app: tauri::AppHandle) {
                                 "保存先の空き容量が残り {} MB です。録音を続けるには空き容量を確保してください。",
                                 available / 1024 / 1024
                             );
-                            tracing::warn!(available_mb = available / 1024 / 1024, "空き容量が不足しています");
-                            if let Err(e) = app.emit("recording:disk-warning", message) {
-                                tracing::warn!(error = %e, "空き容量警告の通知に失敗しました");
-                            }
+                            tracing::warn!(
+                                available_mb = available / 1024 / 1024,
+                                "空き容量が不足しています"
+                            );
+                            state.events.emit(AppEvent::RecordingDiskWarning(message));
                         }
                     }
                 }
             }
-        })
-        .expect("録音状態通知スレッドを起動できません");
+        });
+
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "録音状態通知スレッドを起動できませんでした");
+    }
 }

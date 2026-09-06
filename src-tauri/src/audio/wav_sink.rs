@@ -125,6 +125,31 @@ impl WavSink {
         Ok(())
     }
 
+    /// 既に 16bit PCM になっているサンプルを追記する。
+    ///
+    /// ブラウザから送られてくる録音データはこの形式のため、
+    /// f32 への往復変換を挟まずそのまま書き込む。
+    pub fn write_i16_samples(&mut self, samples: &[i16]) -> AppResult<()> {
+        let mut buf = [0u8; 4096];
+        let mut filled = 0usize;
+
+        for &v in samples {
+            let bytes = v.to_le_bytes();
+            buf[filled] = bytes[0];
+            buf[filled + 1] = bytes[1];
+            filled += 2;
+
+            if filled == buf.len() {
+                self.write_all(&buf)?;
+                filled = 0;
+            }
+        }
+        if filled > 0 {
+            self.write_all(&buf[..filled])?;
+        }
+        Ok(())
+    }
+
     fn write_all(&mut self, bytes: &[u8]) -> AppResult<()> {
         self.writer
             .write_all(bytes)

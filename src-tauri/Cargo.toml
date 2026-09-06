@@ -9,6 +9,17 @@ rust-version = "1.77"
 name = "b_listener_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# ブラウザ版（社内サーバで動かす HTTP サーバ）。
+# デスクトップ版のバイナリに HTTP 関連の依存を持ち込まないよう、feature で分ける。
+[[bin]]
+name = "b-listener-server"
+path = "src/bin/server.rs"
+required-features = ["server"]
+
+[features]
+default = []
+server = ["dep:axum", "dep:tokio", "dep:tower-http", "dep:tokio-stream"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -34,9 +45,15 @@ cpal = "0.15"
 # デバイスのサンプルレート -> 16kHz への高品質リサンプル。
 rubato = "0.16"
 
-# HTTP。用途は「モデルのダウンロード」と「localhost の Ollama」のみ。
+# HTTP クライアント。用途は「モデルのダウンロード」と「localhost の Ollama」のみ。
 # 会議データを外部へ送るコードは存在させない。
 ureq = "2.10"
+
+# ブラウザ版のHTTPサーバ（feature = "server" のときだけ使う）
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"], optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+tower-http = { version = "0.6", features = ["fs", "set-header"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # whisper.cpp を同梱する。macOS では Metal による GPU 実行を有効にする。
@@ -57,8 +74,6 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }
-# モックアプリを組み立てて、パイプライン全体を統合テストするために使う。
-tauri = { version = "2", features = ["test"] }
 
 [profile.release]
 opt-level = 3

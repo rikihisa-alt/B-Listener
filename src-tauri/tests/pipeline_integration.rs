@@ -7,17 +7,30 @@
 //! cargo test --test pipeline_integration -- --ignored --nocapture
 //! ```
 
-use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use b_listener_lib::audio::recorder::Recorder;
 use b_listener_lib::db::models::{JobState, MeetingStatus, TranscriptKind};
-use b_listener_lib::db::{repo, Database};
-use b_listener_lib::settings::SettingsStore;
+use b_listener_lib::db::repo;
+use b_listener_lib::events::NullSink;
 use b_listener_lib::state::{AppPaths, AppState};
-use tauri::Manager;
+
+/// テスト用の共有状態を組み立てる。
+///
+/// デスクトップ版と同じ `AppState::bootstrap` を使うため、
+/// 起動処理そのものもここで検証されることになる。
+fn build_state(app_data_dir: PathBuf, meetings_dir: PathBuf, models_dir: PathBuf) -> Arc<AppState> {
+    AppState::bootstrap(
+        AppPaths {
+            log_dir: app_data_dir.join("logs"),
+            models_dir,
+            app_data_dir,
+            default_meetings_dir: meetings_dir,
+        },
+        Arc::new(NullSink),
+    )
+    .expect("共有状態を組み立てられること")
+}
 
 fn models_dir() -> PathBuf {
     std::env::var("BL_TEST_MODELS_DIR")
@@ -57,11 +70,15 @@ fn processes_recorded_meeting_end_to_end() {
     std::fs::create_dir_all(&app_data_dir).unwrap();
     std::fs::create_dir_all(&meetings_dir).unwrap();
 
-    let db = Database::open(&app_data_dir.join("app.db")).expect("DBを開けること");
-    let settings = SettingsStore::load(&app_data_dir, meetings_dir.clone());
-    let mut s = settings.get();
+    let state = build_state(
+        app_data_dir.clone(),
+        meetings_dir.clone(),
+        models_dir.clone(),
+    );
+    let mut s = state.settings.get();
     s.whisper_model = "small".to_string();
-    settings.update(s).expect("設定を保存できること");
+    state.settings.update(s).expect("設定を保存できること");
+    let db = &state.db;
 
     // 録音済みの会議を再現する
     let folder = meetings_dir.join("2026-09-06_統合テスト会議");
@@ -101,32 +118,9 @@ fn processes_recorded_meeting_end_to_end() {
     })
     .unwrap();
 
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .expect("モックアプリを構築できること");
-
-    app.manage(AppState {
-        paths: AppPaths {
-            app_data_dir: app_data_dir.clone(),
-            log_dir: app_data_dir.join("logs"),
-            models_dir: models_dir.clone(),
-            default_meetings_dir: meetings_dir.clone(),
-        },
-        db,
-        settings,
-        recorder: Recorder::new(),
-        running_pipelines: Mutex::new(HashSet::new()),
-        download_cancel: Arc::new(AtomicBool::new(false)),
-        downloading_model: Mutex::new(None),
-        _log_guard: None,
-    });
-
-    let handle = app.handle().clone();
     let started = std::time::Instant::now();
-    b_listener_lib::pipeline::run_blocking(&handle, &meeting_id).expect("処理が完走すること");
+    b_listener_lib::pipeline::run_blocking(&state, &meeting_id).expect("処理が完走すること");
     println!("処理時間: {:?}", started.elapsed());
-
-    let state = handle.state::<AppState>();
 
     // 1. 全ステップが完了していること
     let jobs = state
@@ -222,8 +216,12 @@ fn keeps_audio_when_transcription_fails() {
     std::fs::create_dir_all(&meetings_dir).unwrap();
     std::fs::create_dir_all(&empty_models).unwrap();
 
-    let db = Database::open(&app_data_dir.join("app.db")).unwrap();
-    let settings = SettingsStore::load(&app_data_dir, meetings_dir.clone());
+    let state = build_state(
+        app_data_dir.clone(),
+        meetings_dir.clone(),
+        empty_models.clone(),
+    );
+    let db = &state.db;
 
     let folder = meetings_dir.join("2026-09-06_モデルなし");
     std::fs::create_dir_all(&folder).unwrap();
@@ -245,27 +243,7 @@ fn keeps_audio_when_transcription_fails() {
     })
     .unwrap();
 
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
-    app.manage(AppState {
-        paths: AppPaths {
-            app_data_dir: app_data_dir.clone(),
-            log_dir: app_data_dir.join("logs"),
-            models_dir: empty_models,
-            default_meetings_dir: meetings_dir.clone(),
-        },
-        db,
-        settings,
-        recorder: Recorder::new(),
-        running_pipelines: Mutex::new(HashSet::new()),
-        download_cancel: Arc::new(AtomicBool::new(false)),
-        downloading_model: Mutex::new(None),
-        _log_guard: None,
-    });
-
-    let handle = app.handle().clone();
-    let err = b_listener_lib::pipeline::run_blocking(&handle, &meeting_id)
+    let err = b_listener_lib::pipeline::run_blocking(&state, &meeting_id)
         .expect_err("モデルが無いので失敗すること");
     println!("期待どおり失敗: {err}");
     assert_eq!(err.code(), "MISSING_COMPONENT");
@@ -278,7 +256,6 @@ fn keeps_audio_when_transcription_fails() {
     );
 
     // 音声の確定ステップは成功し、文字起こしステップだけが失敗していること
-    let state = handle.state::<AppState>();
     let jobs = state
         .db
         .with_conn(|conn| repo::list_job_runs(conn, &meeting_id))
