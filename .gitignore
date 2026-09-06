@@ -1,0 +1,30 @@
+# 依存関係・ビルド成果物
+node_modules/
+dist/
+.tsbuild/
+*.tsbuildinfo
+src-tauri/target/
+
+# Tauri が生成するスキーマ（ビルド時に再生成される）
+src-tauri/gen/schemas/
+
+# OS / エディタ
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ログ・一時ファイル
+*.log
+*.tmp
+
+# 環境変数・秘密情報（このアプリは外部サービスを使わないが、誤コミット防止のため）
+.env
+.env.*
+*.pem
+*.p12
+
+# 署名鍵（配布時に使用。絶対にコミットしない）
+*.keystore
+tauri-private.key
